@@ -59,6 +59,8 @@ class TwoRoomEnv(gym.Env):
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32
         )
 
+        self.env_name = 'TwoRoom'
+
         # Variation space
         self.variation_space = self._build_variation_space()
         if init_value is not None:
@@ -340,6 +342,7 @@ class TwoRoomEnv(gym.Env):
 
     def _get_info(self):
         return {
+            'env_name': self.env_name,
             'proprio': self.agent_position.detach().cpu().numpy(),
             'state': self.agent_position.detach().cpu().numpy(),
             'goal_state': self.target_position.detach().cpu().numpy(),

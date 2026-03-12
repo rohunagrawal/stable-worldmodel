@@ -230,6 +230,7 @@ class PushT(gym.Env):
 
         self.with_target = with_target
         self.coverage_arr = []
+        self.env_name = 'PushT'
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
@@ -384,6 +385,7 @@ class PushT(gym.Env):
         )
 
         info = {
+            'env_name': self.env_name,
             'pos_agent': np.array(self.agent.position),
             'vel_agent': np.array(self.agent.velocity),
             'block_pose': np.array(

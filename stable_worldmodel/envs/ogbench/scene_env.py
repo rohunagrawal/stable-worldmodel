@@ -39,6 +39,7 @@ class SceneEnv(ManipSpaceEnv):
         self._env_type = env_type
         self._permute_blocks = permute_blocks
         self._multiview = multiview
+        self.env_name = 'Scene'
 
         super().__init__(*args, **kwargs)
 
@@ -1080,12 +1081,14 @@ class SceneEnv(ManipSpaceEnv):
 
     def get_reset_info(self):
         reset_info = self.compute_ob_info()
+        reset_info['env_name'] = self.env_name
         reset_info['target'] = self._cur_goal_ob
         reset_info['success'] = self._success
         return reset_info
 
     def get_step_info(self):
         ob_info = self.compute_ob_info()
+        ob_info['env_name'] = self.env_name
         ob_info['target'] = self._cur_goal_ob
         ob_info['success'] = self._success
         return ob_info

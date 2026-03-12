@@ -152,6 +152,7 @@ class PointMazeEnv(gym.Wrapper):
             **kwargs,
         )
         super().__init__(env)
+        self.env_name = 'PointMaze'
 
         # OGBench hardcodes observation_space to (64, 64, 3) for pixels regardless
         # of the width/height passed. Override to match the actual render dimensions.
@@ -312,6 +313,7 @@ class PointMazeEnv(gym.Wrapper):
 
         obs, info = self.env.reset(seed=seed, options=options)
         info.pop('goal', None)
+        info['env_name'] = self.env_name
 
         if options.get('state') is not None:
             state = options['state']
@@ -327,6 +329,11 @@ class PointMazeEnv(gym.Wrapper):
             obs = self.env.get_ob()
 
         return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        info['env_name'] = self.env_name
+        return obs, reward, terminated, truncated, info
 
     def set_state(self, qpos, qvel):
         """Reset the environment to a specific (qpos, qvel) state.

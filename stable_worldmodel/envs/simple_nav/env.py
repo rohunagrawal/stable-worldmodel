@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 
 import numpy as np
 from minigrid.core.grid import Grid
@@ -73,6 +72,8 @@ class SimpleNavigationEnv(MiniGridEnv):
 
         # turn left, turn right, move forward
         self.action_space = spaces.Discrete(3)
+
+        self.env_name = 'SimpleNavigation'
 
         self.variation_space = swm_spaces.Dict(
             {
@@ -230,6 +231,7 @@ class SimpleNavigationEnv(MiniGridEnv):
     def _get_info(self):
         goal_proprio = self.goal_state[:3]
         return {
+            'env_name': self.env_name,
             'pos_agent': np.array(self.agent_pos),
             'dir_agent': np.array(self.agent_dir),
             'pos_goal': np.array(self.goal_pos),

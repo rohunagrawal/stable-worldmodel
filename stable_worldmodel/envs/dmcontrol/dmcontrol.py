@@ -37,6 +37,7 @@ class DMControlWrapper(gym.Env):
         self._cumulative_reward = 0
         self.action_repeat = 2
         self.variation_space = None
+        self.env_name = self.__class__.__name__.replace('DMControlWrapper', '')
 
     @property
     def unwrapped(self):
@@ -50,6 +51,7 @@ class DMControlWrapper(gym.Env):
     @property
     def info(self):
         return {
+            'env_name': self.env_name,
             'success': float('nan'),
             'qpos': np.copy(self.env.physics.data.qpos),
             'qvel': np.copy(self.env.physics.data.qvel),

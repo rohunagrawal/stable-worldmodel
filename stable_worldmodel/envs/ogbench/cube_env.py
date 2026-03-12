@@ -135,6 +135,7 @@ class CubeEnv(ManipSpaceEnv):
         self._env_type = env_type
         self._permute_blocks = permute_blocks
         self._multiview = multiview
+        self.env_name = 'Cube'
 
         if self._env_type == 'single':
             self._num_cubes = 1
@@ -1403,6 +1404,7 @@ class CubeEnv(ManipSpaceEnv):
             Called after initialize_episode() to provide initial state information.
         """
         reset_info = self.compute_ob_info()
+        reset_info['env_name'] = self.env_name
         reset_info['target'] = self._cur_goal_ob
         reset_info['success'] = self._success
         return reset_info
@@ -1423,6 +1425,7 @@ class CubeEnv(ManipSpaceEnv):
             Called after each step to provide feedback about current state and progress.
         """
         ob_info = self.compute_ob_info()
+        ob_info['env_name'] = self.env_name
         ob_info['target'] = self._cur_goal_ob
         ob_info['success'] = self._success
         return ob_info
