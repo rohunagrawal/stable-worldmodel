@@ -44,7 +44,7 @@ def save_pretrained(
     return
 
 
-def load_pretrained(name: str, cache_dir: str = None):
+def load_pretrained(name: str, cache_dir: str = None, extra_args=None):
     """Load a model from a local checkpoint or a HuggingFace repository.
 
     Supported formats for `name`:
@@ -78,6 +78,15 @@ def load_pretrained(name: str, cache_dir: str = None):
     ensure_dir_exists(cache_dir)
     checkpoint_path, config = _resolve(name, cache_dir)
     state_dict = torch.load(checkpoint_path, map_location='cpu')
+
+    # assume keys with the dotted notation
+    if extra_args is not None:
+        for key, value in extra_args.items():
+            parts = key.split('.')
+            d = config
+            for part in parts[:-1]:
+                d = d.setdefault(part, {})
+            d[parts[-1]] = value
 
     model = instantiate(config)
     model.load_state_dict(state_dict)
