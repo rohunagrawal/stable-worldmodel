@@ -63,6 +63,10 @@ class ICEMSolver:
         self.return_mean = return_mean
         self.device = device
         self.torch_gen = torch.Generator(device=device).manual_seed(seed)
+        try:
+            self._dtype = next(model.parameters()).dtype
+        except (AttributeError, StopIteration):
+            self._dtype = torch.float32
 
     def configure(
         self, *, action_space: gym.Space, n_envs: int, config: Any
@@ -76,10 +80,10 @@ class ICEMSolver:
 
         if isinstance(action_space, Box):
             self._action_low = torch.tensor(
-                action_space.low[0], device=self.device, dtype=torch.float32
+                action_space.low[0], device=self.device, dtype=self.dtype
             )
             self._action_high = torch.tensor(
-                action_space.high[0], device=self.device, dtype=torch.float32
+                action_space.high[0], device=self.device, dtype=self.dtype
             )
         else:
             logging.warning(
@@ -103,6 +107,10 @@ class ICEMSolver:
         """Planning horizon in timesteps."""
         return self._config.horizon
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
     def __call__(self, *args: Any, **kwargs: Any) -> dict:
         """Make solver callable, forwarding to solve()."""
         return self.solve(*args, **kwargs)
@@ -112,10 +120,10 @@ class ICEMSolver:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Initialize the action distribution parameters (mean and variance)."""
         var = self.var_scale * torch.ones(
-            [n_envs, self.horizon, self.action_dim]
+            [n_envs, self.horizon, self.action_dim], dtype=self.dtype
         )
         mean = (
-            torch.zeros([n_envs, 0, self.action_dim])
+            torch.zeros([n_envs, 0, self.action_dim], dtype=self.dtype)
             if actions is None
             else actions
         )
@@ -123,7 +131,9 @@ class ICEMSolver:
         remaining = self.horizon - mean.shape[1]
         if remaining > 0:
             device = mean.device
-            new_mean = torch.zeros([n_envs, remaining, self.action_dim])
+            new_mean = torch.zeros(
+                [n_envs, remaining, self.action_dim], dtype=self.dtype
+            )
             mean = torch.cat([mean, new_mean], dim=1).to(device)
 
         return mean, var
@@ -158,9 +168,15 @@ class ICEMSolver:
             for k, v in info_dict.items():
                 v_batch = v[start_idx:end_idx]
                 if torch.is_tensor(v):
-                    v_batch = v_batch.unsqueeze(1)
-                    v_batch = v_batch.expand(
-                        current_bs, self.num_samples, *v_batch.shape[2:]
+                    target_dtype = (
+                        self.dtype if v_batch.is_floating_point() else None
+                    )
+                    v_batch = (
+                        v_batch.to(device=self.device, dtype=target_dtype)
+                        .unsqueeze(1)
+                        .expand(
+                            current_bs, self.num_samples, *v_batch.shape[1:]
+                        )
                     )
                 elif isinstance(v, np.ndarray):
                     v_batch = np.repeat(
@@ -182,7 +198,9 @@ class ICEMSolver:
                 self.action_dim,
                 self.horizon,
             )
-            freqs = torch.fft.rfftfreq(self.horizon, device=self.device)
+            freqs = torch.fft.rfftfreq(self.horizon, device=self.device).to(
+                self.dtype
+            )
             freqs[0] = 1.0
             noise_scale = freqs.pow(-self.noise_beta / 2)
             noise_scale[0] = noise_scale[1]
@@ -194,12 +212,14 @@ class ICEMSolver:
                         noise_shape,
                         generator=self.torch_gen,
                         device=self.device,
+                        dtype=self.dtype,
                     )
                 else:
                     white = torch.randn(
                         noise_shape,
                         generator=self.torch_gen,
                         device=self.device,
+                        dtype=self.dtype,
                     )
                     fft = torch.fft.rfft(white, dim=-1)
                     colored = torch.fft.irfft(
@@ -231,8 +251,7 @@ class ICEMSolver:
                         self._action_low, self._action_high
                     )
 
-                current_info = expanded_infos.copy()
-                costs = self.model.get_cost(current_info, candidates)
+                costs = self.model.get_cost(expanded_infos, candidates)
 
                 assert isinstance(costs, torch.Tensor), (
                     f'Expected cost to be a torch.Tensor, got {type(costs)}'

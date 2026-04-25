@@ -174,22 +174,20 @@ class PGDSolver(torch.nn.Module):
 
             optim = torch.optim.SGD([batch_init], lr=1.0)
 
-            # Prepare Batch Infos
-            # Slice the input info_dict and then expand dimensions
             expanded_infos = {}
             for k, v in info_dict.items():
-                # Slice the data for the current batch indices
-                # Assumes input data dim 0 corresponds to n_envs
                 if torch.is_tensor(v):
-                    batch_v = v[start_idx:end_idx]
-                    batch_v = batch_v.unsqueeze(1)
-                    batch_v = batch_v.expand(
-                        current_bs, self.num_samples, *batch_v.shape[2:]
+                    batch_v = (
+                        v[start_idx:end_idx]
+                        .unsqueeze(1)
+                        .expand(current_bs, self.num_samples, *v.shape[1:])
+                        .to(self.device)
                     )
                 elif isinstance(v, np.ndarray):
-                    batch_v = v[start_idx:end_idx]
                     batch_v = np.repeat(
-                        batch_v[:, None, ...], self.num_samples, axis=1
+                        v[start_idx:end_idx, None, ...],
+                        self.num_samples,
+                        axis=1,
                     )
                 expanded_infos[k] = batch_v
 
@@ -197,10 +195,7 @@ class PGDSolver(torch.nn.Module):
             batch_cost_history = []
 
             for step in range(self.n_steps):
-                current_info = expanded_infos.copy()
-
-                # Calculate cost using the batch parameter
-                costs = self.model.get_cost(current_info, batch_init)
+                costs = self.model.get_cost(expanded_infos, batch_init)
 
                 assert isinstance(costs, torch.Tensor), (
                     f'Got {type(costs)} cost, expect torch.Tensor'

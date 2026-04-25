@@ -45,6 +45,10 @@ class CEMSolver:
         self.topk = topk
         self.device = device
         self.torch_gen = torch.Generator(device=device).manual_seed(seed)
+        try:
+            self._dtype = next(model.parameters()).dtype
+        except (AttributeError, StopIteration):
+            self._dtype = torch.float32
 
     def configure(
         self, *, action_space: gym.Space, n_envs: int, config: Any
@@ -76,6 +80,10 @@ class CEMSolver:
         """Planning horizon in timesteps."""
         return self._config.horizon
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
     def __call__(self, *args: Any, **kwargs: Any) -> dict:
         """Make solver callable, forwarding to solve()."""
         return self.solve(*args, **kwargs)
@@ -85,10 +93,10 @@ class CEMSolver:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Initialize the action distribution parameters (mean and variance)."""
         var = self.var_scale * torch.ones(
-            [n_envs, self.horizon, self.action_dim]
+            [n_envs, self.horizon, self.action_dim], dtype=self.dtype
         )
         mean = (
-            torch.zeros([n_envs, 0, self.action_dim])
+            torch.zeros([n_envs, 0, self.action_dim], dtype=self.dtype)
             if actions is None
             else actions
         )
@@ -96,7 +104,9 @@ class CEMSolver:
         remaining = self.horizon - mean.shape[1]
         if remaining > 0:
             device = mean.device
-            new_mean = torch.zeros([n_envs, remaining, self.action_dim])
+            new_mean = torch.zeros(
+                [n_envs, remaining, self.action_dim], dtype=self.dtype
+            )
             mean = torch.cat([mean, new_mean], dim=1).to(device)
 
         return mean, var
@@ -133,15 +143,19 @@ class CEMSolver:
             # Expand Info Dict for current batch
             expanded_infos = {}
             for k, v in info_dict.items():
-                # v is shape (n_envs, ...)
-                # Slice batch
                 v_batch = v[start_idx:end_idx]
                 if torch.is_tensor(v):
-                    # Add sample dim: (batch, 1, ...)
-                    v_batch = v_batch.unsqueeze(1)
-                    # Expand: (batch, num_samples, ...)
-                    v_batch = v_batch.expand(
-                        current_bs, self.num_samples, *v_batch.shape[2:]
+                    target_dtype = (
+                        self.dtype if v_batch.is_floating_point() else None
+                    )
+                    v_batch = (
+                        v_batch.to(device=self.device, dtype=target_dtype)
+                        .unsqueeze(1)
+                        .expand(
+                            current_bs,
+                            self.num_samples,
+                            *v_batch.shape[1:],
+                        )
                     )
                 elif isinstance(v, np.ndarray):
                     v_batch = np.repeat(
@@ -161,6 +175,7 @@ class CEMSolver:
                     self.action_dim,
                     generator=self.torch_gen,
                     device=self.device,
+                    dtype=self.dtype,
                 )
 
                 # Scale and shift: (Batch, N, H, D) * (Batch, 1, H, D) + (Batch, 1, H, D)
@@ -171,10 +186,8 @@ class CEMSolver:
                 # Force the first sample to be the current mean
                 candidates[:, 0] = batch_mean
 
-                current_info = expanded_infos.copy()
-
                 # Evaluate candidates
-                costs = self.model.get_cost(current_info, candidates)
+                costs = self.model.get_cost(expanded_infos, candidates)
 
                 assert isinstance(costs, torch.Tensor), (
                     f'Expected cost to be a torch.Tensor, got {type(costs)}'
