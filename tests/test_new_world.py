@@ -5,10 +5,9 @@ from collections import deque
 import gymnasium as gym
 import numpy as np
 import pytest
-import torch
 
 from stable_worldmodel.world.env_pool import EnvPool
-from stable_worldmodel.world.world import World, RESET_MODES
+from stable_worldmodel.world.world import World
 
 
 class CounterEnv(gym.Env):
@@ -98,7 +97,9 @@ class RecordingPolicy:
 
 def _make_world(num_envs=2, max_steps=3):
     """Build a World with CounterEnv directly, bypassing gym.make."""
-    pool = EnvPool([lambda ms=max_steps: CounterEnv(ms) for _ in range(num_envs)])
+    pool = EnvPool(
+        [lambda ms=max_steps: CounterEnv(ms) for _ in range(num_envs)]
+    )
     world = object.__new__(World)
     world.envs = pool
     world.policy = None
@@ -161,7 +162,9 @@ class TestRunAutoMode:
         world._run(episodes=6, seed=0, mode='auto', on_done=on_done)
 
         assert len(seeds_seen) == 6
-        assert len(set(seeds_seen)) == len(seeds_seen), f"Duplicate seeds: {seeds_seen}"
+        assert len(set(seeds_seen)) == len(seeds_seen), (
+            f'Duplicate seeds: {seeds_seen}'
+        )
 
     def test_auto_infos_updated_after_reset(self):
         world = _make_world(num_envs=1, max_steps=2)
@@ -177,7 +180,9 @@ class TestRunAutoMode:
         def on_step(w):
             infos_after_reset.append(w.infos['state'][0].copy())
 
-        world._run(episodes=2, seed=0, mode='auto', on_step=on_step, on_done=on_done)
+        world._run(
+            episodes=2, seed=0, mode='auto', on_step=on_step, on_done=on_done
+        )
 
         # after reset, state should go back to low values
         # episode 1: state goes 1, 2 (terminates)
@@ -337,7 +342,9 @@ class TestRunEdgeCases:
             done_count[0] += 1
 
         # episodes=1 should stop before max_steps=100
-        world._run(episodes=1, max_steps=100, seed=0, mode='auto', on_done=on_done)
+        world._run(
+            episodes=1, max_steps=100, seed=0, mode='auto', on_done=on_done
+        )
 
         assert done_count[0] == 1
 

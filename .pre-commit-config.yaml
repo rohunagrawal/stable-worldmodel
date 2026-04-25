@@ -54,4 +54,3 @@ repos:
   #     - id: prettier
   #       types_or: [markdown, yaml, json]
   #       exclude: ^docs/
-

@@ -142,7 +142,12 @@ class SaveCkptCallback(Callback):
             self._save(pl_module.model, epoch)
 
     def _save(self, model, epoch):
-        save_pretrained(model, run_name=self.run_name, config=self.cfg, filename=f'weights_epoch_{epoch}.pt')
+        save_pretrained(
+            model,
+            run_name=self.run_name,
+            config=self.cfg,
+            filename=f'weights_epoch_{epoch}.pt',
+        )
 
 
 # ---------------------------------------------------------------------------
