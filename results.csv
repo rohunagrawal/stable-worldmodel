@@ -1,0 +1,10 @@
+solver,seed,num_eval,horizon,goal_offset_steps,n_steps,lr,checkpoint_path,success_rate,eval_time_s
+adam,456,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,82.0,243.92447209358215
+adam,42,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,66.0,300.34171962738037
+adam,123,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,78.0,312.8416850566864
+adam,456,50,5,50,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,58.0,313.06664633750916
+adam,123,50,5,50,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,44.0,408.5164330005646
+adam,42,50,5,50,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-cube,52.0,431.4887504577637
+cem,123,50,5,50,,,/root/.stable_worldmodel/checkpoints/lewm-cube,50.0,325.91040325164795
+cem,456,50,5,50,,,/root/.stable_worldmodel/checkpoints/lewm-cube,56.00000000000001,334.8075976371765
+cem,42,50,5,50,,,/root/.stable_worldmodel/checkpoints/lewm-cube,48.0,380.46764278411865

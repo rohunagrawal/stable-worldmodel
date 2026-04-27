@@ -7,8 +7,6 @@ world:
   env_name: swm/OGBCube-v0
   num_envs: ${eval.num_eval}
   max_episode_steps: ??? # make sure it's >= eval_budget
-  history_size: 1
-  frame_skip: 1
   env_type: single
   ob_type: states
   multiview: False
@@ -33,8 +31,8 @@ plan_config:
 # evaluation from dataset (replay expert trajectories)
 eval:
   num_eval: 50
-  goal_offset_steps: 25
-  eval_budget: 50
+  goal_offset_steps: 200
+  eval_budget: 400
   img_size: 224
   dataset_name: ogbench/cube_single_expert
   callables:
