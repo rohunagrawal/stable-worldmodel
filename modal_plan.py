@@ -203,6 +203,7 @@ def plan(
     wandb_api_key: str = "",
     wandb_project: str = "",
     policy: str = "",
+    solver_batch_size: int = 0,
 ):
     """Run one seed of MPC planning and append a row to eval_results/<csv_name>."""
     assert wandb_api_key, "wandb_api_key is required — pass --wandb-api-key <key>"
@@ -223,6 +224,7 @@ def plan(
     env = {**os.environ, "STABLEWM_HOME": STABLEWM_HOME, "MUJOCO_GL": "egl"}
     if wandb_api_key:
         env["WANDB_API_KEY"] = wandb_api_key
+        os.environ["WANDB_API_KEY"] = wandb_api_key
 
     cmd = [
         "python", "scripts/plan/eval_wm.py",
@@ -239,7 +241,10 @@ def plan(
         cmd += [
             f"solver.n_steps={n_steps}",
             f"solver.optimizer_kwargs.lr={lr}",
+            "+compile=True",
         ]
+    if solver_batch_size > 0:
+        cmd += [f"solver.batch_size={solver_batch_size}"]
 
     print(f"[{env_name}/{solver}/seed={seed}] Running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd="/app", env=env, capture_output=True, text=True)
@@ -251,6 +256,7 @@ def plan(
     results_txt = Path(STABLEWM_HOME) / "checkpoints" / cfg["results_txt"]
     success_rate = None
     eval_time = None
+    peak_gpu_memory_gb = None
     if results_txt.exists():
         txt = results_txt.read_text()
         for m in re.finditer(r"'success_rate':\s*([\d.]+)", txt):
@@ -258,7 +264,10 @@ def plan(
         for m in re.finditer(r"evaluation_time:\s*([\d.]+)", txt):
             eval_time = float(m.group(1))
 
-    print(f"[{env_name}/{solver}/seed={seed}] success_rate={success_rate}  eval_time={eval_time}s")
+    for m in re.finditer(r"peak_gpu_memory_gb:\s*([\d.]+)", result.stdout):
+        peak_gpu_memory_gb = float(m.group(1))
+
+    print(f"[{env_name}/{solver}/seed={seed}] success_rate={success_rate}  eval_time={eval_time}s  peak_gpu_memory={peak_gpu_memory_gb}GB")
 
     row = {
         "env": env_name,
@@ -272,6 +281,7 @@ def plan(
         "checkpoint_path": str(Path(STABLEWM_HOME) / "checkpoints" / effective_policy),
         "success_rate": success_rate,
         "eval_time_s": eval_time,
+        "peak_gpu_memory_gb": peak_gpu_memory_gb,
     }
 
     output_dir = Path(STABLEWM_HOME) / "eval_results"
@@ -294,11 +304,89 @@ def plan(
             name=f"{env_name}-{solver}-seed{seed}",
             config={k: v for k, v in row.items() if k not in ("success_rate", "eval_time_s")},
         )
-        wandb.log({"success_rate": success_rate, "eval_time_s": eval_time})
+        wandb.log({"success_rate": success_rate, "eval_time_s": eval_time, "peak_gpu_memory_gb": peak_gpu_memory_gb})
         wandb.finish()
 
     volume.commit()
     print(f"Row appended to {csv_path}")
+    return success_rate
+
+
+@app.function(
+    image=image,
+    volumes={STABLEWM_HOME: volume},
+    timeout=120,
+    cpu=1.0,
+)
+def refresh_adv_weights(epoch: int, policy: str = "lewm-reacher-adv"):
+    """Copy weights_epoch_N.pt → weights.pt so load_pretrained picks the latest epoch."""
+    import shutil
+    from stable_worldmodel.data.utils import get_cache_dir
+
+    ckpt_dir = get_cache_dir(sub_folder="checkpoints") / policy
+    src = ckpt_dir / f"weights_epoch_{epoch}.pt"
+    dst = ckpt_dir / "weights.pt"
+    if src.exists():
+        shutil.copy2(src, dst)
+        volume.commit()
+        print(f"Refreshed: {src.name} → weights.pt in {ckpt_dir}")
+    else:
+        available = sorted(p.name for p in ckpt_dir.glob("weights*.pt"))
+        print(f"WARNING: {src.name} not found. Available: {available}")
+
+
+@app.local_entrypoint()
+def compare(
+    epoch: int = 0,
+    policy_adv: str = "lewm-reacher-adv",
+    policy_base: str = "lewm-reacher",
+    env_name: str = "reacher",
+    wandb_api_key: str = "",
+    num_eval: int = 50,
+):
+    """Run 5 seeds × 2 checkpoints in parallel and print RESULTS_JSON."""
+    import json
+    import numpy as np
+
+    seeds = [42, 123, 456, 789, 1024]
+
+    # Refresh adv checkpoint so load_pretrained picks epoch N weights
+    refresh_adv_weights.remote(epoch=epoch, policy=policy_adv)
+
+    # Spawn all 10 evals in parallel
+    handles = []
+    for policy in [policy_adv, policy_base]:
+        for seed in seeds:
+            h = plan.spawn(
+                env_name=env_name,
+                solver="adam",
+                seed=seed,
+                num_eval=num_eval,
+                wandb_api_key=wandb_api_key,
+                policy=policy,
+                n_steps=30,
+                lr=0.1,
+            )
+            handles.append((policy, seed, h))
+
+    results = {policy_adv: [], policy_base: []}
+    for policy, seed, h in handles:
+        try:
+            sr = h.get()
+            if sr is not None:
+                results[policy].append(sr)
+        except Exception as e:
+            print(f"WARNING: eval failed policy={policy} seed={seed}: {e}")
+
+    summary = {}
+    for policy, rates in results.items():
+        summary[policy] = {
+            "mean": round(float(np.mean(rates)), 1) if rates else None,
+            "std": round(float(np.std(rates)), 1) if rates else None,
+            "rates": rates,
+        }
+
+    print(f"RESULTS_JSON:{json.dumps({'epoch': epoch, 'results': summary})}")
 
 
 @app.local_entrypoint()
@@ -314,6 +402,7 @@ def main(
     wandb_api_key: str = "",
     wandb_project: str = "",
     policy: str = "",
+    solver_batch_size: int = 0,
 ):
     """Run one seed of MPC planning and append results to the shared CSV."""
     assert wandb_api_key, "wandb_api_key is required — pass --wandb-api-key <key>"
@@ -329,6 +418,7 @@ def main(
         wandb_api_key=wandb_api_key,
         wandb_project=wandb_project,
         policy=policy,
+        solver_batch_size=solver_batch_size,
     )
 
 

@@ -103,9 +103,12 @@ class LeWM(nn.Module):
 
     def criterion(self, info_dict: dict):
         """Compute the cost between predicted embeddings and goal embeddings."""
-        pred_emb = info_dict['predicted_emb']  # (B,S, T-1, dim)
-        goal_emb = info_dict['goal_emb']  # (B, S, T, dim)
+        pred_emb = info_dict['predicted_emb']  # (B, S, T-1, dim)
+        goal_emb = info_dict['goal_emb']  # (B, S, T, dim) or (B, T, dim)
 
+        # align dims: goal_emb may lack the S dimension when computed from a single obs
+        while goal_emb.ndim < pred_emb.ndim:
+            goal_emb = goal_emb.unsqueeze(1)
         goal_emb = goal_emb[..., -1:, :].expand_as(pred_emb)
 
         # return last-step cost per action candidate

@@ -80,9 +80,9 @@ image = (
 _GPU_TRAIN_KWARGS = dict(
     image=image,
     volumes={STABLEWM_HOME: volume},
-    gpu="A100-40GB",
+    gpu="A100-40GB:2",
     timeout=3600 * 24,
-    cpu=20.0,
+    cpu=32.0,
 )
 
 
@@ -114,8 +114,6 @@ def train(
     wandb_api_key: str = "",
     run_name: str = "",
     max_epochs: int = 100,
-    num_workers: int = 16,
-    prefetch_factor: int = 8,
     adversarial: bool = False,
     data_config: str = "ogb",
     dataset_name: str = "",
@@ -130,20 +128,21 @@ def train(
     if not effective_name:
         raise ValueError(f"Cannot resolve dataset for data_config={data_config!r}; pass dataset_name")
 
+    import time
+
     local_h5 = _copy_dataset_local(Path(STABLEWM_HOME) / "datasets" / f"{effective_name}.h5")
 
     script = "scripts/train/lewm_adversarial.py" if adversarial else "scripts/train/lewm.py"
     cmd = [
         "python", script,
         f"data={data_config}",
-        f"data.dataset.path={local_h5}",
+        f"+data.dataset.path={local_h5}",
         f"output_model_name={run_name}",
         f"trainer.max_epochs={max_epochs}",
-        f"num_workers={num_workers}",
-        f"loader.prefetch_factor={prefetch_factor}",
         "wandb.enabled=true",
         "wandb.config.entity=null",
         f"hydra.run.dir={STABLEWM_HOME}/hydra_outputs",
+        f"subdir=run_{int(time.time())}",  # unique dir so Lightning never auto-resumes a stale ckpt
     ]
     if adversarial:
         cmd.append(f"pretrained={pretrained_model_name}")
@@ -158,8 +157,6 @@ def main(
     env_name: str = "cube",
     run_name: str = "",
     max_epochs: int = 100,
-    num_workers: int = 16,
-    prefetch_factor: int = 8,
     adversarial: bool = False,
     pretrained_model_name: str = "",
     download: bool = True,
@@ -181,8 +178,6 @@ def main(
         wandb_api_key=wandb_api_key,
         run_name=effective_run_name,
         max_epochs=max_epochs,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
         adversarial=adversarial,
         data_config=cfg["data_config"],
         pretrained_model_name=pretrained_model_name or (cfg["pretrained"] if adversarial else ""),

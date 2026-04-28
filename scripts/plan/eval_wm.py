@@ -197,6 +197,18 @@ def run(cfg: DictConfig):
                 video=results_path,
             )
         print('Warmup done.')
+        # reset policy action buffers so actual eval starts with clean state
+        policy = world.policy
+        if hasattr(policy, '_action_buffer'):
+            from collections import deque
+            policy._action_buffer = [
+                deque(maxlen=policy.flatten_receding_horizon)
+                for _ in range(world.num_envs)
+            ]
+            policy._next_init = None
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     start_time = time.time()
     with autocast_ctx:
@@ -212,6 +224,10 @@ def run(cfg: DictConfig):
             video=results_path,
         )
     end_time = time.time()
+
+    if torch.cuda.is_available():
+        peak_gb = torch.cuda.max_memory_allocated() / 1e9
+        print(f'peak_gpu_memory_gb: {peak_gb:.3f}')
 
     print(metrics)
 

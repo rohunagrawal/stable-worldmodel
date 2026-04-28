@@ -6,7 +6,7 @@ output_model_name: lewm-cube-adv
 subdir: ${hydra:job.id}
 pretrained: lewm-cube
 
-num_workers: 6
+num_workers: 16
 train_split: 0.9
 seed: 3072
 img_size: 224
@@ -25,17 +25,17 @@ trainer:
   gradient_clip_val: 1.0
 
 loader:
-  batch_size: 128
+  batch_size: 256
   num_workers: ${num_workers}
   drop_last: True
   persistent_workers: True
-  prefetch_factor: 3
+  prefetch_factor: 2
   pin_memory: True
   shuffle: True
 
 optimizer:
   type: AdamW
-  lr: 5e-5
+  lr: 2e-4
   weight_decay: 1e-3
 
 wandb:
@@ -70,6 +70,6 @@ loss:
       num_proj: 1024
 
 adv:
-  eps_factor: 0.2         # emb_eps = per-sample-std(ctx_emb) * eps_factor
-  action_eps_factor: 0.08  # act_eps = per-sample-std(ctx_act) * action_eps_factor
+  eps_factor: 0.05         # emb_eps = per-sample-std(ctx_emb) * eps_factor
+  action_eps_factor: 0.02  # act_eps = per-sample-std(ctx_act) * action_eps_factor
   alpha_factor: 1.25       # FGSM step size = alpha_factor * eps
