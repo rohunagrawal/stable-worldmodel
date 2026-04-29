@@ -356,6 +356,8 @@ class WorldModelPolicy(BasePolicy):
         self.transform = transform or {}
         self._action_buffer: list[deque[torch.Tensor]] | None = None
         self._next_init: torch.Tensor | None = None
+        self._planning_metrics: list[dict] = []
+        self._episode_reset_pending: bool = False
 
     @property
     def flatten_receding_horizon(self) -> int:
@@ -381,6 +383,107 @@ class WorldModelPolicy(BasePolicy):
             'Solver must implement the Solver protocol'
         )
 
+    def _measure_sim_l2(self, info_dict: dict, idx_tensor: torch.Tensor) -> float:
+        """L2 between current real obs embedding and goal embedding (simulator ground truth)."""
+        model = self.solver.model
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
+
+        pix = info_dict['pixels'][idx_tensor].to(device=device, dtype=dtype)
+        goal_pix = info_dict['goal'][idx_tensor].to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            cur_emb = model.encode({'pixels': pix})['emb'][:, -1]     # (n, D)
+            goal_emb = model.encode({'pixels': goal_pix})['emb'][:, -1]  # (n, D)
+
+        return (cur_emb - goal_emb).pow(2).sum(-1).sqrt().mean().item()
+
+    def _compute_sim_l2_per_step(
+        self,
+        replan_idx: list[int],
+        info_dict: dict,
+        all_step_actions: list[torch.Tensor],
+    ) -> list[float]:
+        """For each GD step, roll out the saved actions in the real simulator and
+        measure L2 to goal in WM latent space.  Uses physics save/restore so the
+        episode state is unchanged after this call.
+        """
+        from torchvision import tv_tensors
+
+        model = self.solver.model
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
+        single_action_dim = self.solver._action_dim  # e.g. 2 for reacher
+
+        # Access individual envs: self.env is EnvPool, .envs is list of MegaWrapper
+        individual_envs = [
+            self.env.envs[i].unwrapped for i in replan_idx
+        ]
+        n_replan = len(replan_idx)
+        idx_tensor = torch.as_tensor(replan_idx, dtype=torch.long)
+
+        # Save current physics state for each env
+        saved_qpos = [e.env.physics.data.qpos.copy() for e in individual_envs]
+        saved_qvel = [e.env.physics.data.qvel.copy() for e in individual_envs]
+
+        # Goal qpos for set_target_qpos (may not exist on all env types)
+        goal_qpos_np = None
+        if 'goal_qpos' in info_dict and all(
+            hasattr(e, 'set_target_qpos') for e in individual_envs
+        ):
+            goal_qpos_np = (
+                info_dict['goal_qpos'][idx_tensor, 0].cpu().numpy()
+                if torch.is_tensor(info_dict['goal_qpos'])
+                else info_dict['goal_qpos'][replan_idx, 0]
+            )  # (n_replan, nq)
+
+        # Encode goal once (pixels already transformed by _prepare_info)
+        goal_pix = info_dict['goal'][idx_tensor].to(device=device, dtype=dtype)
+        with torch.no_grad():
+            goal_emb = model.encode({'pixels': goal_pix})['emb'][:, -1]  # (n_replan, D)
+
+        sim_l2_per_step: list[float] = []
+
+        for step_actions in all_step_actions:
+            # step_actions: (n_replan, num_samples, horizon, action_dim_flat)
+            actions_np = (
+                step_actions[:, 0]
+                .reshape(n_replan, -1, single_action_dim)
+                .numpy()
+            )  # (n_replan, horizon*action_block, single_dim)
+            n_env_steps = actions_np.shape[1]
+
+            # Restore state, execute, render
+            pix_tensors = []
+            for i, env in enumerate(individual_envs):
+                env.set_state(saved_qpos[i], saved_qvel[i])
+                if goal_qpos_np is not None:
+                    env.set_target_qpos(goal_qpos_np[i])
+                for t in range(n_env_steps):
+                    env.step(actions_np[i, t])
+                raw = env.render()  # (H, W, C) uint8
+                raw_chw = np.ascontiguousarray(np.transpose(raw, (2, 0, 1)))  # (C, H, W)
+                pix_tensors.append(
+                    self.transform['pixels'](tv_tensors.Image(raw_chw))
+                )
+
+            pix_batch = (
+                torch.stack(pix_tensors).unsqueeze(1).to(device=device, dtype=dtype)
+            )  # (n_replan, 1, C, H, W)
+            with torch.no_grad():
+                cur_emb = model.encode({'pixels': pix_batch})['emb'][:, -1]
+
+            sim_l2 = (cur_emb - goal_emb).pow(2).sum(-1).sqrt().mean().item()
+            sim_l2_per_step.append(sim_l2)
+
+        # Restore original state
+        for i, env in enumerate(individual_envs):
+            env.set_state(saved_qpos[i], saved_qvel[i])
+            if goal_qpos_np is not None:
+                env.set_target_qpos(goal_qpos_np[i])
+
+        return sim_l2_per_step
+
     def get_action(self, info_dict: dict, **kwargs: Any) -> np.ndarray:
         """Get action via planning with the world model.
 
@@ -405,6 +508,7 @@ class WorldModelPolicy(BasePolicy):
                     self._action_buffer[i].clear()
                     if self._next_init is not None:
                         self._next_init[i] = 0
+                    self._episode_reset_pending = True
 
         terminated = info_dict.get('terminated')
         dead = (
@@ -421,6 +525,9 @@ class WorldModelPolicy(BasePolicy):
 
         if replan_idx:
             idx_tensor = torch.as_tensor(replan_idx, dtype=torch.long)
+
+            self._episode_reset_pending = False
+
             sliced = {}
             for k, v in info_dict.items():
                 if torch.is_tensor(v):
@@ -439,6 +546,22 @@ class WorldModelPolicy(BasePolicy):
             )
 
             outputs = self.solver(sliced, init_action=sliced_init)
+
+            if 'step_metrics' in outputs:
+                metrics = outputs['step_metrics']
+                all_step_actions = metrics.pop('all_step_actions', None)
+                if (
+                    all_step_actions is not None
+                    and hasattr(self.solver, 'model')
+                    and hasattr(self.env, 'envs')
+                    and 'pixels' in self.transform
+                    and hasattr(self.env.envs[0].unwrapped, 'env')
+                    and hasattr(getattr(self.env.envs[0].unwrapped, 'env', None), 'physics')
+                ):
+                    metrics['sim_l2'] = self._compute_sim_l2_per_step(
+                        replan_idx, info_dict, all_step_actions
+                    )
+                self._planning_metrics.append(metrics)
 
             actions = outputs['actions']
             keep_horizon = self.cfg.receding_horizon

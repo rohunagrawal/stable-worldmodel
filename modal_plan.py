@@ -37,6 +37,15 @@ ENV_CONFIGS = {
         csv_name="reacher_results.csv",
         wandb_project="stable-worldmodel-plan-reacher",
     ),
+    "pusht": dict(
+        checkpoint_hf_repo="quentinll/lewm-pusht",
+        checkpoint_name="lewm-pusht",
+        config_name="pusht",
+        goal_offset_steps=25,
+        results_txt="pusht_results.txt",
+        csv_name="pusht_results.csv",
+        wandb_project="stable-worldmodel-plan-pusht",
+    ),
 }
 
 image = (
@@ -58,7 +67,7 @@ image = (
         "libopengl0",
     )
     .pip_install_from_pyproject("pyproject.toml", optional_dependencies=["train", "env"])
-    .pip_install("wandb")
+    .pip_install("wandb", "matplotlib")
     .add_local_dir(
         ".",
         "/app",
@@ -187,6 +196,90 @@ def fix_reacher_dataset():
 @app.function(
     image=image,
     volumes={STABLEWM_HOME: volume},
+    timeout=3600 * 4,
+    cpu=4.0,
+)
+def download_pusht_dataset(force_redownload: bool = False):
+    """Download + extract the PushT dataset into datasets/pusht_expert_train.h5. Idempotent."""
+    import subprocess
+    from pathlib import Path
+
+    from stable_worldmodel.data.utils import (
+        _download,
+        _hf_dataset_find_archive,
+        get_cache_dir,
+    )
+
+    HF_REPO = "quentinll/lewm-pusht"
+    DATASET_LOCAL_NAME = "pusht_expert_train"
+    HF_BASE_URL = "https://huggingface.co"
+
+    datasets_dir = get_cache_dir(sub_folder="datasets")
+    local_dir = datasets_dir / HF_REPO.replace("/", "--")
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    expected_h5 = datasets_dir / f"{DATASET_LOCAL_NAME}.h5"
+    if not force_redownload and expected_h5.exists() and not expected_h5.is_symlink():
+        print(f"Dataset already present at {expected_h5} ({expected_h5.stat().st_size / 1e9:.1f} GB), skipping.")
+        return
+    if expected_h5.is_symlink():
+        expected_h5.unlink()
+
+    archive_name = _hf_dataset_find_archive(HF_REPO)
+    url = f"{HF_BASE_URL}/datasets/{HF_REPO}/resolve/main/{archive_name}"
+    archive_path = local_dir / archive_name
+
+    if force_redownload and archive_path.exists():
+        print(f"Force-removing existing archive: {archive_path}")
+        archive_path.unlink()
+
+    if not archive_path.exists():
+        print(f"Downloading {url} ...")
+        _download(url, archive_path)
+        volume.commit()
+        print(f"Archive downloaded: {archive_path.stat().st_size / 1e9:.1f} GB")
+    else:
+        print(f"Archive already present ({archive_path.stat().st_size / 1e9:.1f} GB), skipping download.")
+
+    print(f"Extracting {archive_path} ...")
+    if archive_name.endswith(".tar.zst"):
+        result = subprocess.run(
+            ["tar", "--use-compress-program=unzstd", "-xf", str(archive_path), "-C", str(local_dir)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError("Extraction failed")
+        h5_files = list(local_dir.glob("*.h5")) + list(local_dir.glob("*.hdf5"))
+        if not h5_files:
+            raise RuntimeError("No h5 file found after extraction")
+        actual_h5 = h5_files[0]
+    else:
+        # .h5.zst — bare zstd-compressed h5 file
+        stem = archive_name[: -len(".zst")]  # e.g. pusht_expert_train.h5
+        actual_h5 = local_dir / stem
+        result = subprocess.run(
+            ["zstd", "-d", str(archive_path), "-o", str(actual_h5), "--force"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError("Extraction failed")
+
+    print(f"Extracted: {actual_h5} ({actual_h5.stat().st_size / 1e9:.1f} GB)")
+
+    archive_path.unlink()
+    expected_h5.parent.mkdir(parents=True, exist_ok=True)
+    expected_h5.symlink_to(actual_h5)
+    print(f"Linked: {expected_h5} → {actual_h5}")
+
+    volume.commit()
+    print("PushT dataset ready.")
+
+
+@app.function(
+    image=image,
+    volumes={STABLEWM_HOME: volume},
     gpu="A100-40GB",
     timeout=3600 * 4,
     cpu=8.0,
@@ -241,7 +334,7 @@ def plan(
         cmd += [
             f"solver.n_steps={n_steps}",
             f"solver.optimizer_kwargs.lr={lr}",
-            "+compile=True",
+            "++compile=True",
         ]
     if solver_batch_size > 0:
         cmd += [f"solver.batch_size={solver_batch_size}"]
@@ -309,7 +402,14 @@ def plan(
 
     volume.commit()
     print(f"Row appended to {csv_path}")
-    return success_rate
+
+    plot_bytes = None
+    plot_path = Path(STABLEWM_HOME) / "checkpoints" / f"planning_metrics_{effective_policy}.png"
+    if plot_path.exists():
+        plot_bytes = plot_path.read_bytes()
+        print(f"Planning metrics plot read ({len(plot_bytes)} bytes)")
+
+    return {"success_rate": success_rate, "plot_bytes": plot_bytes}
 
 
 @app.function(
@@ -372,7 +472,8 @@ def compare(
     results = {policy_adv: [], policy_base: []}
     for policy, seed, h in handles:
         try:
-            sr = h.get()
+            ret = h.get()
+            sr = ret["success_rate"] if isinstance(ret, dict) else ret
             if sr is not None:
                 results[policy].append(sr)
         except Exception as e:
@@ -406,7 +507,9 @@ def main(
 ):
     """Run one seed of MPC planning and append results to the shared CSV."""
     assert wandb_api_key, "wandb_api_key is required — pass --wandb-api-key <key>"
-    plan.remote(
+    from pathlib import Path
+
+    ret = plan.remote(
         env_name=env_name,
         solver=solver,
         seed=seed,
@@ -420,6 +523,12 @@ def main(
         policy=policy,
         solver_batch_size=solver_batch_size,
     )
+    if isinstance(ret, dict) and ret.get("plot_bytes"):
+        _policy_name = policy or ENV_CONFIGS[env_name]["checkpoint_name"]
+        local_plot = Path(f"eval_results/planning_metrics_{env_name}_{solver}_{_policy_name}_seed{seed}.png")
+        local_plot.parent.mkdir(parents=True, exist_ok=True)
+        local_plot.write_bytes(ret["plot_bytes"])
+        print(f"Planning metrics plot saved locally to {local_plot}")
 
 
 # --- Utility functions ---

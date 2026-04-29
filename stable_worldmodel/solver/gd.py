@@ -167,6 +167,12 @@ class GradientSolver(torch.nn.Module):
         # Lists to hold results from each batch to be concatenated later
         batch_top_actions_list = []
 
+        # Per-step metric accumulators (averaged over envs)
+        wm_l2_sums = np.zeros(self.n_steps)
+        total_envs_processed = 0
+        # All_step_actions[step] = list of per-batch tensors (concatenated after loop)
+        all_step_actions: list[list] = [[] for _ in range(self.n_steps)]
+
         # --- Outer Loop: Iterate over batches ---
         for start_idx in range(0, total_envs, batch_size):
             end_idx = min(start_idx + batch_size, total_envs)
@@ -234,6 +240,13 @@ class GradientSolver(torch.nn.Module):
 
                 batch_cost_history.append(cost.item())
 
+                # Record per-step WM L2 (sqrt of per-env MSE cost)
+                wm_l2_sums[step] += costs[:, 0].detach().sqrt().sum().item()
+                # Save current action candidates for sim rollout in policy.py
+                all_step_actions[step].append(batch_init.detach().cpu())
+
+            total_envs_processed += current_bs
+
             # Store cost history for this batch
             outputs['cost'].append(batch_cost_history)
 
@@ -249,6 +262,13 @@ class GradientSolver(torch.nn.Module):
 
         # Concatenate all batch results
         outputs['actions'] = torch.cat(batch_top_actions_list, dim=0)
+        if total_envs_processed > 0:
+            outputs['step_metrics'] = {
+                'wm_l2': (wm_l2_sums / total_envs_processed).tolist(),
+                'all_step_actions': [
+                    torch.cat(batches, dim=0) for batches in all_step_actions
+                ],  # list of n_steps tensors, each (total_envs, num_samples, horizon, action_dim)
+            }
         end_time = time.time()
         print(
             f'GradientSolver.solve completed in {end_time - start_time:.4f} seconds.'

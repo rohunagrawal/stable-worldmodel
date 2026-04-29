@@ -22,6 +22,7 @@ CHECKPOINT_NAME = "lewm-cube"
 DATA_CONFIG_DEFAULTS = {
     "ogb": "ogbench/cube_single_expert",
     "dmc": "dmc/reacher_random",
+    "pusht": "pusht_expert_train",
 }
 
 ENV_CONFIGS = {
@@ -36,6 +37,12 @@ ENV_CONFIGS = {
         run_name="lewm-reacher",
         run_name_adv="lewm-reacher-adv",
         pretrained="lewm-reacher",
+    ),
+    "pusht": dict(
+        data_config="pusht",
+        run_name="lewm-pusht",
+        run_name_adv="lewm-pusht-adv",
+        pretrained="lewm-pusht",
     ),
 }
 
@@ -98,14 +105,30 @@ def _make_env(wandb_api_key: str = "", mujoco_gl: bool = False) -> dict:
 
 
 def _copy_dataset_local(src, dst: str = "/tmp/dataset.h5") -> str:
+    """Copy or decompress a dataset to local disk. Falls back to .h5.zst if .h5 is absent."""
     import shutil
+    import subprocess
     from pathlib import Path
 
     src, dst = Path(src), Path(dst)
-    if not dst.exists():
+    if dst.exists():
+        return str(dst)
+
+    if src.exists():
         print(f"Copying {src} ({src.stat().st_size / 1e9:.1f} GB) to local disk...")
         shutil.copy2(src, dst)
-        print("Dataset copy done.")
+    else:
+        # h5 not on volume — decompress archive directly to local disk (faster)
+        zst = src.parent / (src.name + ".zst")
+        if not zst.exists():
+            raise FileNotFoundError(f"Neither {src} nor {zst} found on volume")
+        print(f"Decompressing {zst} ({zst.stat().st_size / 1e9:.1f} GB) to {dst} ...")
+        subprocess.run(
+            ["zstd", "-d", str(zst), "-o", str(dst), "--force", "-T0"],
+            check=True,
+        )
+
+    print("Dataset ready at local disk.")
     return str(dst)
 
 
