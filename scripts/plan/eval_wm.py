@@ -197,6 +197,20 @@ def run(cfg: DictConfig):
                 video=results_path,
             )
         print('Warmup done.')
+        # reset policy action buffers so actual eval starts with clean state
+        policy = world.policy
+        if hasattr(policy, '_action_buffer'):
+            from collections import deque
+            policy._action_buffer = [
+                deque(maxlen=policy.flatten_receding_horizon)
+                for _ in range(world.num_envs)
+            ]
+            policy._next_init = None
+        if hasattr(policy, '_planning_metrics'):
+            policy._planning_metrics = []
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     start_time = time.time()
     with autocast_ctx:
@@ -213,6 +227,10 @@ def run(cfg: DictConfig):
         )
     end_time = time.time()
 
+    if torch.cuda.is_available():
+        peak_gb = torch.cuda.max_memory_allocated() / 1e9
+        print(f'peak_gpu_memory_gb: {peak_gb:.3f}')
+
     print(metrics)
 
     results_path = results_path / cfg.output.filename
@@ -228,6 +246,39 @@ def run(cfg: DictConfig):
         f.write('==== RESULTS ====\n')
         f.write(f'metrics: {metrics}\n')
         f.write(f'evaluation_time: {end_time - start_time} seconds\n')
+
+    if (
+        policy != 'random'
+        and hasattr(policy, '_planning_metrics')
+        and policy._planning_metrics
+    ):
+        import matplotlib.pyplot as plt
+
+        pm = policy._planning_metrics
+        complete = [m for m in pm if 'sim_l2' in m and 'wm_l2' in m]
+        if not complete:
+            print('No complete planning metrics (sim_l2 not filled); skipping plot.')
+            return
+        n_steps = len(pm[0]['wm_l2'])
+        wm_l2 = np.mean([m['wm_l2'] for m in complete], axis=0)
+        sim_l2 = np.mean([m['sim_l2'] for m in complete], axis=0)
+        gap = sim_l2 - wm_l2
+
+        steps = np.arange(1, n_steps + 1)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(steps, wm_l2, label='WM L2', color='steelblue')
+        ax.plot(steps, sim_l2, label='Sim L2', color='orange', linestyle='--')
+        ax.plot(steps, gap, label='Gap (Sim − WM)', color='green', linestyle=':')
+        ax.set_xlabel('GD Iteration')
+        ax.set_ylabel('L2 Distance (latent space)')
+        ax.set_title('Planning Metrics over GD Iterations')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plot_path = results_path.parent / f'planning_metrics_{cfg.policy}.png'
+        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Planning metrics plot saved to {plot_path}')
 
 
 if __name__ == '__main__':

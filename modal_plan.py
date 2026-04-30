@@ -37,6 +37,15 @@ ENV_CONFIGS = {
         csv_name="reacher_results.csv",
         wandb_project="stable-worldmodel-plan-reacher",
     ),
+    "pusht": dict(
+        checkpoint_hf_repo="quentinll/lewm-pusht",
+        checkpoint_name="lewm-pusht",
+        config_name="pusht",
+        goal_offset_steps=25,
+        results_txt="pusht_results.txt",
+        csv_name="pusht_results.csv",
+        wandb_project="stable-worldmodel-plan-pusht",
+    ),
 }
 
 image = (
@@ -58,7 +67,7 @@ image = (
         "libopengl0",
     )
     .pip_install_from_pyproject("pyproject.toml", optional_dependencies=["train", "env"])
-    .pip_install("wandb")
+    .pip_install("wandb", "matplotlib")
     .add_local_dir(
         ".",
         "/app",
@@ -187,6 +196,90 @@ def fix_reacher_dataset():
 @app.function(
     image=image,
     volumes={STABLEWM_HOME: volume},
+    timeout=3600 * 4,
+    cpu=4.0,
+)
+def download_pusht_dataset(force_redownload: bool = False):
+    """Download + extract the PushT dataset into datasets/pusht_expert_train.h5. Idempotent."""
+    import subprocess
+    from pathlib import Path
+
+    from stable_worldmodel.data.utils import (
+        _download,
+        _hf_dataset_find_archive,
+        get_cache_dir,
+    )
+
+    HF_REPO = "quentinll/lewm-pusht"
+    DATASET_LOCAL_NAME = "pusht_expert_train"
+    HF_BASE_URL = "https://huggingface.co"
+
+    datasets_dir = get_cache_dir(sub_folder="datasets")
+    local_dir = datasets_dir / HF_REPO.replace("/", "--")
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    expected_h5 = datasets_dir / f"{DATASET_LOCAL_NAME}.h5"
+    if not force_redownload and expected_h5.exists() and not expected_h5.is_symlink():
+        print(f"Dataset already present at {expected_h5} ({expected_h5.stat().st_size / 1e9:.1f} GB), skipping.")
+        return
+    if expected_h5.is_symlink():
+        expected_h5.unlink()
+
+    archive_name = _hf_dataset_find_archive(HF_REPO)
+    url = f"{HF_BASE_URL}/datasets/{HF_REPO}/resolve/main/{archive_name}"
+    archive_path = local_dir / archive_name
+
+    if force_redownload and archive_path.exists():
+        print(f"Force-removing existing archive: {archive_path}")
+        archive_path.unlink()
+
+    if not archive_path.exists():
+        print(f"Downloading {url} ...")
+        _download(url, archive_path)
+        volume.commit()
+        print(f"Archive downloaded: {archive_path.stat().st_size / 1e9:.1f} GB")
+    else:
+        print(f"Archive already present ({archive_path.stat().st_size / 1e9:.1f} GB), skipping download.")
+
+    print(f"Extracting {archive_path} ...")
+    if archive_name.endswith(".tar.zst"):
+        result = subprocess.run(
+            ["tar", "--use-compress-program=unzstd", "-xf", str(archive_path), "-C", str(local_dir)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError("Extraction failed")
+        h5_files = list(local_dir.glob("*.h5")) + list(local_dir.glob("*.hdf5"))
+        if not h5_files:
+            raise RuntimeError("No h5 file found after extraction")
+        actual_h5 = h5_files[0]
+    else:
+        # .h5.zst — bare zstd-compressed h5 file
+        stem = archive_name[: -len(".zst")]  # e.g. pusht_expert_train.h5
+        actual_h5 = local_dir / stem
+        result = subprocess.run(
+            ["zstd", "-d", str(archive_path), "-o", str(actual_h5), "--force"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(result.stderr)
+            raise RuntimeError("Extraction failed")
+
+    print(f"Extracted: {actual_h5} ({actual_h5.stat().st_size / 1e9:.1f} GB)")
+
+    archive_path.unlink()
+    expected_h5.parent.mkdir(parents=True, exist_ok=True)
+    expected_h5.symlink_to(actual_h5)
+    print(f"Linked: {expected_h5} → {actual_h5}")
+
+    volume.commit()
+    print("PushT dataset ready.")
+
+
+@app.function(
+    image=image,
+    volumes={STABLEWM_HOME: volume},
     gpu="A100-40GB",
     timeout=3600 * 4,
     cpu=8.0,
@@ -203,6 +296,7 @@ def plan(
     wandb_api_key: str = "",
     wandb_project: str = "",
     policy: str = "",
+    solver_batch_size: int = 0,
 ):
     """Run one seed of MPC planning and append a row to eval_results/<csv_name>."""
     assert wandb_api_key, "wandb_api_key is required — pass --wandb-api-key <key>"
@@ -223,6 +317,7 @@ def plan(
     env = {**os.environ, "STABLEWM_HOME": STABLEWM_HOME, "MUJOCO_GL": "egl"}
     if wandb_api_key:
         env["WANDB_API_KEY"] = wandb_api_key
+        os.environ["WANDB_API_KEY"] = wandb_api_key
 
     cmd = [
         "python", "scripts/plan/eval_wm.py",
@@ -239,7 +334,10 @@ def plan(
         cmd += [
             f"solver.n_steps={n_steps}",
             f"solver.optimizer_kwargs.lr={lr}",
+            "++compile=True",
         ]
+    if solver_batch_size > 0:
+        cmd += [f"solver.batch_size={solver_batch_size}"]
 
     print(f"[{env_name}/{solver}/seed={seed}] Running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd="/app", env=env, capture_output=True, text=True)
@@ -251,6 +349,7 @@ def plan(
     results_txt = Path(STABLEWM_HOME) / "checkpoints" / cfg["results_txt"]
     success_rate = None
     eval_time = None
+    peak_gpu_memory_gb = None
     if results_txt.exists():
         txt = results_txt.read_text()
         for m in re.finditer(r"'success_rate':\s*([\d.]+)", txt):
@@ -258,7 +357,10 @@ def plan(
         for m in re.finditer(r"evaluation_time:\s*([\d.]+)", txt):
             eval_time = float(m.group(1))
 
-    print(f"[{env_name}/{solver}/seed={seed}] success_rate={success_rate}  eval_time={eval_time}s")
+    for m in re.finditer(r"peak_gpu_memory_gb:\s*([\d.]+)", result.stdout):
+        peak_gpu_memory_gb = float(m.group(1))
+
+    print(f"[{env_name}/{solver}/seed={seed}] success_rate={success_rate}  eval_time={eval_time}s  peak_gpu_memory={peak_gpu_memory_gb}GB")
 
     row = {
         "env": env_name,
@@ -272,6 +374,7 @@ def plan(
         "checkpoint_path": str(Path(STABLEWM_HOME) / "checkpoints" / effective_policy),
         "success_rate": success_rate,
         "eval_time_s": eval_time,
+        "peak_gpu_memory_gb": peak_gpu_memory_gb,
     }
 
     output_dir = Path(STABLEWM_HOME) / "eval_results"
@@ -294,11 +397,97 @@ def plan(
             name=f"{env_name}-{solver}-seed{seed}",
             config={k: v for k, v in row.items() if k not in ("success_rate", "eval_time_s")},
         )
-        wandb.log({"success_rate": success_rate, "eval_time_s": eval_time})
+        wandb.log({"success_rate": success_rate, "eval_time_s": eval_time, "peak_gpu_memory_gb": peak_gpu_memory_gb})
         wandb.finish()
 
     volume.commit()
     print(f"Row appended to {csv_path}")
+
+    plot_bytes = None
+    plot_path = Path(STABLEWM_HOME) / "checkpoints" / f"planning_metrics_{effective_policy}.png"
+    if plot_path.exists():
+        plot_bytes = plot_path.read_bytes()
+        print(f"Planning metrics plot read ({len(plot_bytes)} bytes)")
+
+    return {"success_rate": success_rate, "plot_bytes": plot_bytes}
+
+
+@app.function(
+    image=image,
+    volumes={STABLEWM_HOME: volume},
+    timeout=120,
+    cpu=1.0,
+)
+def refresh_adv_weights(epoch: int, policy: str = "lewm-reacher-adv"):
+    """Copy weights_epoch_N.pt → weights.pt so load_pretrained picks the latest epoch."""
+    import shutil
+    from stable_worldmodel.data.utils import get_cache_dir
+
+    ckpt_dir = get_cache_dir(sub_folder="checkpoints") / policy
+    src = ckpt_dir / f"weights_epoch_{epoch}.pt"
+    dst = ckpt_dir / "weights.pt"
+    if src.exists():
+        shutil.copy2(src, dst)
+        volume.commit()
+        print(f"Refreshed: {src.name} → weights.pt in {ckpt_dir}")
+    else:
+        available = sorted(p.name for p in ckpt_dir.glob("weights*.pt"))
+        print(f"WARNING: {src.name} not found. Available: {available}")
+
+
+@app.local_entrypoint()
+def compare(
+    epoch: int = 0,
+    policy_adv: str = "lewm-reacher-adv",
+    policy_base: str = "lewm-reacher",
+    env_name: str = "reacher",
+    wandb_api_key: str = "",
+    num_eval: int = 50,
+):
+    """Run 5 seeds × 2 checkpoints in parallel and print RESULTS_JSON."""
+    import json
+    import numpy as np
+
+    seeds = [42, 123, 456, 789, 1024]
+
+    # Refresh adv checkpoint so load_pretrained picks epoch N weights
+    refresh_adv_weights.remote(epoch=epoch, policy=policy_adv)
+
+    # Spawn all 10 evals in parallel
+    handles = []
+    for policy in [policy_adv, policy_base]:
+        for seed in seeds:
+            h = plan.spawn(
+                env_name=env_name,
+                solver="adam",
+                seed=seed,
+                num_eval=num_eval,
+                wandb_api_key=wandb_api_key,
+                policy=policy,
+                n_steps=30,
+                lr=0.1,
+            )
+            handles.append((policy, seed, h))
+
+    results = {policy_adv: [], policy_base: []}
+    for policy, seed, h in handles:
+        try:
+            ret = h.get()
+            sr = ret["success_rate"] if isinstance(ret, dict) else ret
+            if sr is not None:
+                results[policy].append(sr)
+        except Exception as e:
+            print(f"WARNING: eval failed policy={policy} seed={seed}: {e}")
+
+    summary = {}
+    for policy, rates in results.items():
+        summary[policy] = {
+            "mean": round(float(np.mean(rates)), 1) if rates else None,
+            "std": round(float(np.std(rates)), 1) if rates else None,
+            "rates": rates,
+        }
+
+    print(f"RESULTS_JSON:{json.dumps({'epoch': epoch, 'results': summary})}")
 
 
 @app.local_entrypoint()
@@ -314,10 +503,13 @@ def main(
     wandb_api_key: str = "",
     wandb_project: str = "",
     policy: str = "",
+    solver_batch_size: int = 0,
 ):
     """Run one seed of MPC planning and append results to the shared CSV."""
     assert wandb_api_key, "wandb_api_key is required — pass --wandb-api-key <key>"
-    plan.remote(
+    from pathlib import Path
+
+    ret = plan.remote(
         env_name=env_name,
         solver=solver,
         seed=seed,
@@ -329,7 +521,14 @@ def main(
         wandb_api_key=wandb_api_key,
         wandb_project=wandb_project,
         policy=policy,
+        solver_batch_size=solver_batch_size,
     )
+    if isinstance(ret, dict) and ret.get("plot_bytes"):
+        _policy_name = policy or ENV_CONFIGS[env_name]["checkpoint_name"]
+        local_plot = Path(f"eval_results/planning_metrics_{env_name}_{solver}_{_policy_name}_seed{seed}.png")
+        local_plot.parent.mkdir(parents=True, exist_ok=True)
+        local_plot.write_bytes(ret["plot_bytes"])
+        print(f"Planning metrics plot saved locally to {local_plot}")
 
 
 # --- Utility functions ---

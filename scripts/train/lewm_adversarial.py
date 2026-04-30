@@ -74,6 +74,13 @@ class SaveCkptCallback(Callback):
             config=None,
             filename=f'weights_epoch_{epoch}.pt',
         )
+        # Commit the volume so other Modal containers can see this checkpoint.
+        try:
+            import modal
+            modal.Volume.from_name("stableworldmodel").commit()
+            print(f"Volume committed after epoch {epoch} checkpoint.")
+        except Exception as e:
+            print(f"Warning: volume commit failed: {e}")
 
 
 def lejepa_adversarial_forward(self, batch, stage, cfg):
@@ -148,6 +155,10 @@ def lejepa_adversarial_forward(self, batch, stage, cfg):
 
 @hydra.main(version_base=None, config_path='./config', config_name='lewm_adversarial')
 def run(cfg):
+    # Use filesystem-backed IPC instead of /dev/shm (containers cap shm at ~64 MB).
+    import torch.multiprocessing
+    torch.multiprocessing.set_sharing_strategy('file_system')
+
     #########################
     ##       dataset       ##
     #########################

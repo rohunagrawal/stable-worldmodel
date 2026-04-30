@@ -1,0 +1,5 @@
+solver,seed,num_eval,horizon,goal_offset_steps,n_steps,lr,checkpoint_path,success_rate,eval_time_s
+cem,42,50,5,25,,,/root/.stable_worldmodel/checkpoints/lewm-reacher,76.0,154.12916827201843
+adam,42,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-reacher,56.00000000000001,272.5284399986267
+reacher,adam,42,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-reacher,56.00000000000001,93.74518513679504
+reacher,adam,42,50,5,25,30,0.1,/root/.stable_worldmodel/checkpoints/lewm-reacher,56.00000000000001,107.89521622657776

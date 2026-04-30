@@ -128,10 +128,15 @@ def _resolve_folder(folder: Path) -> tuple[Path, dict]:
     if not pt_files:
         raise FileNotFoundError(f'No .pt file found in {folder}')
     if len(pt_files) > 1:
-        raise ValueError(
-            f'Ambiguous checkpoint: multiple .pt files in {folder}. '
-            'Specify the file directly.'
-        )
+        # Prefer weights.pt when multiple epoch checkpoints coexist.
+        canonical = folder / 'weights.pt'
+        if canonical in pt_files:
+            pt_files = [canonical]
+        else:
+            raise ValueError(
+                f'Ambiguous checkpoint: multiple .pt files in {folder}. '
+                'Specify the file directly.'
+            )
     logging.info(f'Loading checkpoint from folder {folder}...')
     return pt_files[0], _load_config(folder)
 

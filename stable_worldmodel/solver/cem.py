@@ -125,6 +125,7 @@ class CEMSolver:
 
         # Batch size is taken from info_dict so callers can solve for a subset of envs
         total_envs = len(next(iter(info_dict.values())))
+        batch_size = self.batch_size or total_envs
 
         # -- initialize the action distribution globally
         mean, var = self.init_action_distrib(total_envs, init_action)
@@ -132,8 +133,8 @@ class CEMSolver:
         var = var.to(self.device)
 
         # --- Iterate over batches ---
-        for start_idx in range(0, total_envs, self.batch_size):
-            end_idx = min(start_idx + self.batch_size, total_envs)
+        for start_idx in range(0, total_envs, batch_size):
+            end_idx = min(start_idx + batch_size, total_envs)
             current_bs = end_idx - start_idx
 
             # Slice Distribution Parameters for current batch
